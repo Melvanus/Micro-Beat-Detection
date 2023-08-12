@@ -3,6 +3,8 @@
 #define FHT_N 128 // amount of bins to use
 #include <FHT.h> // include the library
 
+#include "TapTempoButton.h"
+
 #define FreqLog // use log scale for FHT frequencies
 #define FreqGainFactorBits 0
 #define FreqSerialBinary
@@ -41,9 +43,6 @@ const float MINIMUM_LIGHT_INTENSITY_PULSE = 0.70;
 const float MAXIMUM_LIGHT_INTENSITY_PULSE = 0.8; // in range [0:1]
 const float LIGHT_INTENSITY_RANGE_PULSE = MAXIMUM_LIGHT_INTENSITY_PULSE - MINIMUM_LIGHT_INTENSITY_PULSE;
 
-const int FLASH_BUTTON = 4;
-const int FLASH_COOLDOWN = 1000;
-
 const int MAXIMUM_SIGNAL_VALUE = 1024;
 
 const int OVERALL_FREQUENCY_RANGE_START = 1; // should be 0, but first 2 bands produce too much noise
@@ -58,11 +57,9 @@ const int SECOND_FREQUENCY_RANGE_START = 2;
 const int SECOND_FREQUENCY_RANGE_END = 6;
 const int SECOND_FREQUENCY_RANGE = SECOND_FREQUENCY_RANGE_END - SECOND_FREQUENCY_RANGE_START;
 
-const int MAXIMUM_BEATS_PER_MINUTE = 140;
-const int MINIMUM_DELAY_BETWEEN_BEATS = 60000L / MAXIMUM_BEATS_PER_MINUTE;
 const int SINGLE_BEAT_DURATION = 100; // good value range is [50:150]
 
-const int FREQUENCY_MAGNITUDE_SAMPLES = 200; // good value range is [5:15]
+const int FREQUENCY_MAGNITUDE_SAMPLES = 100; // good value range is [5:15]
 
 int frequencyMagnitudeSampleIndex = 0;
 
@@ -108,6 +105,15 @@ float intensityMultiplier = 1.0;
 
 unsigned long lastFlashTimestamp = 0;
 
+float max_bpm = 140;
+int min_delay_between_beats = (int) (60000.0 / max_bpm);
+
+const int FLASH_BUTTON = 4;
+int flash_cooldown_millis = 1000;
+
+TapTempoButton tapTempo;
+Button flashButton;
+
 void setup() {
   setupADC();
 
@@ -132,6 +138,9 @@ void setup() {
     signals[i] = 0;
   }
   
+  flashButton.begin(FLASH_BUTTON);
+  tapTempo.begin(FLASH_BUTTON);
+
   Serial.begin(115200);
   //Serial.println("Starting Festival Hat Controller");
 }
@@ -174,25 +183,18 @@ void loop() {
 
       if (PERFORM_BEAT_DETECTION) 
       {
-
-        start = millis();
-
         getFrequencyData();
-
-
-        printExecutionTime();
-
         processFrequencyData();
         updateBeatProbability();
 
-        if (lastFlashTimestamp + FLASH_COOLDOWN < millis())
+        if (lastFlashTimestamp + flash_cooldown_millis < millis())
         {
           updateLightIntensityBasedOnBeats();
         }
       } 
       else 
       {
-        if (lastFlashTimestamp + FLASH_COOLDOWN < millis())
+        if (lastFlashTimestamp + flash_cooldown_millis < millis())
         {
           updateLightIntensityBasedOnAmplitudes();
         }
@@ -290,7 +292,7 @@ void readPoti()
   ADCSRA = 0xf5; // restart adc
   ADMUX = 0x1; // use adc1. Use ARef pin for analog reference (same as analogReference(EXTERNAL)).
   ADMUX |= 0x40; // Use Vcc for analog reference.
-  delayMicroseconds(200);
+  delayMicroseconds(100);
   byte m = ADCL; // fetch adc data
   byte j = ADCH;
   int output = (j << 8) | m; // form into an int
@@ -345,10 +347,6 @@ void logFrequencyData()
  */
 void processFrequencyData() 
 {
-  // each of the methods below will:
-  //  - get the current frequency magnitude
-  //  - add the current magnitude to the history
-  //  - update relevant features
   processOverallFrequencyMagnitude();
   processFirstFrequencyMagnitude();
   processSecondFrequencyMagnitude();
@@ -541,7 +539,7 @@ float calculateMagnitudeChangeFactor()
   
   if (magnitudeChangeFactor < 0.5 && aboveAverageOverallMagnitudeFactor > 0.5) {
     // there's no bass related beat, but the overall magnitude changed significantly
-    magnitudeChangeFactor = max(magnitudeChangeFactor, aboveAverageOverallMagnitudeFactor);
+    //magnitudeChangeFactor = max(magnitudeChangeFactor, aboveAverageOverallMagnitudeFactor);
   } else {
     // this is here to avoid treating signal noise as beats
     //magnitudeChangeFactor *= 1 - aboveAverageOverallMagnitudeFactor;
@@ -598,7 +596,7 @@ float calculateRecencyFactor()
   float recencyFactor = 1;
   durationSinceLastBeat = millis() - lastBeatTimestamp;
   
-  int referenceDuration = MINIMUM_DELAY_BETWEEN_BEATS - SINGLE_BEAT_DURATION;
+  int referenceDuration = min_delay_between_beats - SINGLE_BEAT_DURATION;
   recencyFactor = 1 - ((float) referenceDuration / durationSinceLastBeat);
   recencyFactor = constrain(recencyFactor, 0, 1);
   
@@ -651,17 +649,30 @@ void updateLightIntensityBasedOnAmplitudes()
   }
 }
 
+void setMaxBPM(float bpm)
+{
+    max_bpm = (int) (bpm * 1.05);
+    min_delay_between_beats = 60000L / max_bpm;
+    flash_cooldown_millis = (60000L / max_bpm) * 2;
+}
+
 /**
  * Will update the hat lights based on the last light intensity bumps.
  */
 void updateLights()
 {
-  int flash = digitalRead(FLASH_BUTTON);
-  if (flash != 0) {
+  tapTempo.update();
+
+  if (tapTempo.isPressedThisFrame()){
     lightIntensityBumpValue = 1.0f;
     lightIntensityBumpTimestamp = millis();
     lastFlashTimestamp = millis();
     durationSinceLastBeat = 0;
+  }
+
+  if (tapTempo.hasTempoChanged()){
+    int bpm = (int) tapTempo.getTempo();
+    setMaxBPM(bpm);
   }
 
   unsigned long durationSinceLastBump = millis() - lightIntensityBumpTimestamp;
