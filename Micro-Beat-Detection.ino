@@ -3,7 +3,9 @@
 #define FHT_N 128 // amount of bins to use
 #include <FHT.h> // include the library
 
+#include "Button.h"
 #include "TapTempoButton.h"
+#include "Mode.h"
 
 #define FreqLog // use log scale for FHT frequencies
 #define FreqGainFactorBits 0
@@ -25,22 +27,16 @@ const bool LOG_SAMPLING = false;
 // of detected amplitudes.
 const bool PERFORM_BEAT_DETECTION = true;
 
-const int SOUND_REFERENCE_PIN = 8; // D8
-const int HAT_LIGHTS_PIN = 10; // D9
-const int HAT_LIGHTS_LOW_PIN = 13; // D11
-const int HAT_LIGHTS_HIGH_PIN = 12; // D12
-const int HAT_LIGHTS_PULSE_PIN = 9; // D13
-
-const int LIGHT_PULSE_DELAY = 10000;
-const int LIGHT_PULSE_DURATION = 2000;
+const int LIGHTS_PIN_1 = 10; // D9
+const int LIGHTS_PIN_2 = 9; // D13
 
 const int LIGHT_FADE_OUT_DURATION = 360; // good value range is [100:1000]
 const float MINIMUM_LIGHT_INTENSITY = 0.018; // in range [0:1]
 const float MAXIMUM_LIGHT_INTENSITY = 1.0; // in range [0:1]
 const float LIGHT_INTENSITY_RANGE = MAXIMUM_LIGHT_INTENSITY - MINIMUM_LIGHT_INTENSITY;
 
-const float MINIMUM_LIGHT_INTENSITY_PULSE = 0.70;
-const float MAXIMUM_LIGHT_INTENSITY_PULSE = 0.8; // in range [0:1]
+const float MINIMUM_LIGHT_INTENSITY_PULSE = 0.018;
+const float MAXIMUM_LIGHT_INTENSITY_PULSE = 1.0; // in range [0:1]
 const float LIGHT_INTENSITY_RANGE_PULSE = MAXIMUM_LIGHT_INTENSITY_PULSE - MINIMUM_LIGHT_INTENSITY_PULSE;
 
 const int MAXIMUM_SIGNAL_VALUE = 1024;
@@ -53,8 +49,8 @@ const int FIRST_FREQUENCY_RANGE_START = 1;
 const int FIRST_FREQUENCY_RANGE_END = 3;
 const int FIRST_FREQUENCY_RANGE = FIRST_FREQUENCY_RANGE_END - FIRST_FREQUENCY_RANGE_START;
 
-const int SECOND_FREQUENCY_RANGE_START = 2;
-const int SECOND_FREQUENCY_RANGE_END = 6;
+const int SECOND_FREQUENCY_RANGE_START = 4;
+const int SECOND_FREQUENCY_RANGE_END = 8;
 const int SECOND_FREQUENCY_RANGE = SECOND_FREQUENCY_RANGE_END - SECOND_FREQUENCY_RANGE_START;
 
 const int SINGLE_BEAT_DURATION = 100; // good value range is [50:150]
@@ -95,6 +91,7 @@ float beatProbabilityThreshold = 0.5;
 unsigned long lightIntensityBumpTimestamp = 0;
 float lightIntensityBumpValue = 0;
 float lightIntensityValue = 0;
+float fadeFactor = 0;
 
 unsigned long lastPulseTimestamp = 0;
 
@@ -105,31 +102,37 @@ float intensityMultiplier = 1.0;
 
 unsigned long lastFlashTimestamp = 0;
 
-float max_bpm = 140;
+unsigned long stroboStartTime = 0;
+
+const int INITIAL_BPM = 124;
+float max_bpm = INITIAL_BPM * 1.1;
 int min_delay_between_beats = (int) (60000.0 / max_bpm);
 
-const int FLASH_BUTTON = 4;
+int lightPulseDelay = (int) ((60000.0 / INITIAL_BPM) * 16.0);
+int lightPulseDuration = (int) (lightPulseDelay / 8.0);
+
+const int TAP_BUTTON = 4;
+TapTempoButton tapTempo;
 int flash_cooldown_millis = 1000;
 
-TapTempoButton tapTempo;
-Button flashButton;
+const int BUTTON_UP = 3;
+Button buttonUp;
+const int BUTTON_DOWN = 2;
+Button buttonDown;
+
+Mode currentModeLight1 = Mode::BeatDetection;
+Mode currentModeLight2 = Mode::BeatDetection;
 
 void setup() {
   setupADC();
 
   pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(HAT_LIGHTS_PIN, OUTPUT);
-  pinMode(HAT_LIGHTS_LOW_PIN, OUTPUT);
-  pinMode(HAT_LIGHTS_HIGH_PIN, OUTPUT);
-  pinMode(HAT_LIGHTS_PULSE_PIN, OUTPUT);
-  pinMode(SOUND_REFERENCE_PIN, OUTPUT);
-  pinMode(FLASH_BUTTON, INPUT);
+  pinMode(LIGHTS_PIN_1, OUTPUT);
+  pinMode(LIGHTS_PIN_2, OUTPUT);
 
-  digitalWrite(HAT_LIGHTS_PIN, HIGH);
-  digitalWrite(SOUND_REFERENCE_PIN, HIGH);
-  
-  analogWrite(HAT_LIGHTS_LOW_PIN, 255 * MINIMUM_LIGHT_INTENSITY);
-  analogWrite(HAT_LIGHTS_HIGH_PIN, 255 * MAXIMUM_LIGHT_INTENSITY);
+  digitalWrite(LED_BUILTIN, HIGH);
+  digitalWrite(LIGHTS_PIN_1, MINIMUM_LIGHT_INTENSITY);
+  digitalWrite(LIGHTS_PIN_2, MINIMUM_LIGHT_INTENSITY);
 
   for (int i = 0; i < FREQUENCY_MAGNITUDE_SAMPLES; i++) {
     overallFrequencyMagnitudes[i] = 0;
@@ -138,10 +141,14 @@ void setup() {
     signals[i] = 0;
   }
   
-  flashButton.begin(FLASH_BUTTON);
-  tapTempo.begin(FLASH_BUTTON);
+  tapTempo.begin(TAP_BUTTON);
+  tapTempo.setTempo(INITIAL_BPM);
+  buttonUp.begin(BUTTON_UP);
+  buttonDown.begin(BUTTON_DOWN);
 
+#ifndef DisableLOG
   Serial.begin(115200);
+#endif
   //Serial.println("Starting Festival Hat Controller");
 }
 
@@ -170,6 +177,8 @@ void printExecutionTime()
 void loop() {
   while(1)
   {
+    //Serial.println(millis());
+
     if (LOG_FREQUENCY_DATA) 
     {
       readAudioSamples();
@@ -207,9 +216,6 @@ void loop() {
       }
 
       updateLights();
-
-      unsigned long end = millis();
-
     }
   }
 
@@ -222,10 +228,8 @@ void readAudioSamples() {
   long currentAverage = 0;
   long currentMaximum = 0;
   long currentMinimum = MAXIMUM_SIGNAL_VALUE;
-  
   float sampleSum = 0;
 
-  long timeStart = millis();
   for (int i = 0; i < FHT_N; i++) 
   { // save 256 samples
     while (!(ADCSRA & /*0x10*/_BV(ADIF))); // wait for adc to be ready (ADIF)
@@ -249,9 +253,6 @@ void readAudioSamples() {
 
     fht_input[i] = k - 256; // put real data into bins
   }
-  long timeEnd = millis();
-  long duration = timeEnd - timeStart;
-  Serial.println(duration);
 
   float sampleAverage = sampleSum / FHT_N;
   if (LOG_SAMPLING)
@@ -270,6 +271,7 @@ void readAudioSamples() {
   
   int signalDelta = currentMaximum - currentAverage;
   currentSignal = currentAverage + (2 * signalDelta);
+  //Serial.println(currentSignal);
     
   processHistoryValues(
     signals, 
@@ -305,6 +307,8 @@ void readPoti()
     //logValue("M", intensityMultiplier, 100);
   }
   
+  //Serial.println(intensityMultiplier);
+
   sei();
   ADMUX = 0x0; // use adc1. Use ARef pin for analog reference (same as analogReference(EXTERNAL)).
   ADMUX |= 0x40; // Use Vcc for analog reference.
@@ -533,7 +537,7 @@ float calculateMagnitudeChangeFactor()
   aboveAverageSecondMagnitudeFactor = constrain(aboveAverageSecondMagnitudeFactor, 0, 1);
   
   float magnitudeChangeFactor = aboveAverageFirstMagnitudeFactor;
-  if (magnitudeChangeFactor > 0.15) {
+  if (magnitudeChangeFactor > 0.3) { //0.15
     magnitudeChangeFactor = max(aboveAverageFirstMagnitudeFactor, aboveAverageSecondMagnitudeFactor);
   }
   
@@ -555,12 +559,12 @@ float calculateMagnitudeChangeFactor()
   //logValue("C1", (currentFirstFrequencyMagnitude) / maximumMagnitude, 10);
   //logValue("C2", (currentSecondFrequencyMagnitude) / maximumMagnitude, 10);
 
-  logValue("AO", aboveAverageOverallMagnitudeFactor, 2);
-  logValue("A1", aboveAverageFirstMagnitudeFactor, 10);
-  logValue("A2", aboveAverageSecondMagnitudeFactor, 10);
+  //logValue("AO", aboveAverageOverallMagnitudeFactor, 2);
+  //logValue("A1", aboveAverageFirstMagnitudeFactor, 10);
+  //logValue("A2", aboveAverageSecondMagnitudeFactor, 10);
   //logValue("A1|2", max(aboveAverageFirstMagnitudeFactor, aboveAverageSecondMagnitudeFactor), 1);
   
-  logValue("M", magnitudeChangeFactor, 1);
+  //logValue("M", magnitudeChangeFactor, 1);
   
   return magnitudeChangeFactor;
 }
@@ -651,9 +655,107 @@ void updateLightIntensityBasedOnAmplitudes()
 
 void setMaxBPM(float bpm)
 {
+    int lightPulseDelay = (int) ((60000.0 / bpm) * 16.0);
+    int lightPulseDuration = (int) (lightPulseDelay / 8.0);
     max_bpm = (int) (bpm * 1.05);
     min_delay_between_beats = 60000L / max_bpm;
     flash_cooldown_millis = (60000L / max_bpm) * 2;
+}
+
+float getLightIntensity()
+{
+  unsigned long durationSinceLastBump = millis() - lightIntensityBumpTimestamp;
+  fadeFactor = 1 - ((float) durationSinceLastBump / LIGHT_FADE_OUT_DURATION);
+  fadeFactor = constrain(fadeFactor, 0, 1);
+  lightIntensityValue = lightIntensityBumpValue * fadeFactor * intensityMultiplier;
+  lightIntensityValue = constrain(lightIntensityValue, 0, 1);
+    // scale the intensity to be in range of maximum and minimum
+  float scaledLightIntensity = MINIMUM_LIGHT_INTENSITY + (lightIntensityValue * LIGHT_INTENSITY_RANGE);
+  return scaledLightIntensity;
+}
+
+float getLightIntensityPulse()
+{
+  // update the pulse signal
+  unsigned long durationSincePulse = millis() - lastPulseTimestamp;
+   
+  float pulse = 0.3;
+  if (durationSincePulse > lightPulseDelay - lightPulseDuration)
+  {
+    lastPulseTimestamp = millis();
+    durationSincePulse = 0;
+  }
+
+  if (durationSincePulse < lightPulseDuration)
+  {
+    float x = durationSincePulse / (float) lightPulseDuration;
+    float fq = constrain(lightPulseDuration / 1000.0, 0.01, 10);
+    float wave = 0.7 * sin((PI*x)/fq);
+    pulse += wave;
+  }
+  
+  pulse *= intensityMultiplier;
+  pulse = constrain(pulse, 0, 1);
+
+  // scale the intensity to be in range of maximum and minimum
+  float lightIntensityPulse = MINIMUM_LIGHT_INTENSITY_PULSE + (pulse * LIGHT_INTENSITY_RANGE_PULSE);
+
+  return lightIntensityPulse;
+}
+
+
+float getStroboscope()
+{
+  unsigned long time = millis();
+  int beatTime = tapTempo.getBeatDurationMillis();
+  int dividedBeatTime = beatTime / 8;
+  unsigned long timeSinceStroboStart = time - stroboStartTime;
+  int dividedTime = timeSinceStroboStart / dividedBeatTime;
+  if (dividedTime % 2 == 0)
+  {
+    return MINIMUM_LIGHT_INTENSITY + (intensityMultiplier * LIGHT_INTENSITY_RANGE);
+  }
+  return 0;
+}
+
+float getLightIntensityForMode(Mode m)
+{
+  switch(m)
+  {
+    case Mode::BeatDetection:
+      return getLightIntensity();
+    case Mode::Stroboscope:
+      return getStroboscope();
+    case Mode::SoundIntensity:
+      return getLightIntensity();
+    case Mode::Pulse:
+      return getLightIntensityPulse();
+    case Mode::On:
+      return MINIMUM_LIGHT_INTENSITY + LIGHT_INTENSITY_RANGE * intensityMultiplier;
+    case Mode::Off:
+      return MINIMUM_LIGHT_INTENSITY;
+    default:
+      return 0;
+  }
+}
+
+void SetModeUp(Mode& m)
+{
+  m++;
+  CheckStroboMode(m);
+}
+
+void SetModeDown(Mode& m)
+{
+  m--;
+  CheckStroboMode(m);
+}
+
+void CheckStroboMode(Mode& m)
+{
+  if (m == Mode::Stroboscope){
+    stroboStartTime = millis();
+  }
 }
 
 /**
@@ -662,61 +764,79 @@ void setMaxBPM(float bpm)
 void updateLights()
 {
   tapTempo.update();
+  buttonUp.update();
+  buttonDown.update();
 
+  bool buttonUpPressedThisFrame = buttonUp.isPressedThisFrame();
+  bool buttonDownPressedThisFrame = buttonDown.isPressedThisFrame();
+  bool tapTempoIsPressed = tapTempo.isPressed();
+
+  if (buttonUpPressedThisFrame || buttonDownPressedThisFrame)
+  {
+    if (!tapTempoIsPressed)
+    {
+      if (buttonUpPressedThisFrame)
+      {
+        SetModeUp(currentModeLight1);
+      }
+      else if (buttonDownPressedThisFrame)
+      {
+        SetModeDown(currentModeLight1);
+      }
+      Serial.println(String("Switching mode of light #1: ") + modeToString(currentModeLight1));
+    }
+    else
+    {
+      if (buttonUpPressedThisFrame)
+      {
+        SetModeUp(currentModeLight2);
+      }
+      else if (buttonDownPressedThisFrame)
+      {
+        SetModeDown(currentModeLight2);
+      }
+      tapTempo.resetTapMeasurement();
+      Serial.println(String("Switching mode of light #2: ") + modeToString(currentModeLight2));
+    }
+  }
+  
+  
   if (tapTempo.isPressedThisFrame()){
     lightIntensityBumpValue = 1.0f;
     lightIntensityBumpTimestamp = millis();
     lastFlashTimestamp = millis();
+    lastPulseTimestamp = millis();
     durationSinceLastBeat = 0;
   }
 
   if (tapTempo.hasTempoChanged()){
-    int bpm = (int) tapTempo.getTempo();
+    float bpm = tapTempo.getTempo();
     setMaxBPM(bpm);
   }
 
-  unsigned long durationSinceLastBump = millis() - lightIntensityBumpTimestamp;
-  float fadeFactor = 1 - ((float) durationSinceLastBump / LIGHT_FADE_OUT_DURATION);
-  fadeFactor = constrain(fadeFactor, 0, 1);
+
+  float intensityLight1 = getLightIntensityForMode(currentModeLight1);
+  intensityLight1 = constrain(intensityLight1, 0, 1);
   
-  lightIntensityValue = lightIntensityBumpValue * fadeFactor * intensityMultiplier;
-  lightIntensityValue = constrain(lightIntensityValue, 0, 1);
-  
-  //logValue("L", lightIntensityValue, 20);
-  
-  // scale the intensity to be in range of maximum and minimum
-  float scaledLightIntensity = MINIMUM_LIGHT_INTENSITY + (lightIntensityValue * LIGHT_INTENSITY_RANGE);
-  
-  int pinValue = 255 * scaledLightIntensity;
-  analogWrite(HAT_LIGHTS_PIN, pinValue);
+  float intensityLight2 = intensityLight1;
+  if (currentModeLight1 != currentModeLight2)
+  {
+    intensityLight2 = getLightIntensityForMode(currentModeLight2);
+    intensityLight2 = constrain(intensityLight2, 0, 1);
+  }
+
+  int pinValue1 = 255 * intensityLight1;
+  analogWrite(LIGHTS_PIN_1, pinValue1);
+  int pinValue2 = 255 * intensityLight2;
+  analogWrite(LIGHTS_PIN_2, pinValue2);
   
   // also use the builtin LED, for debugging when no lights are connected
-  if (scaledLightIntensity > MAXIMUM_LIGHT_INTENSITY - (LIGHT_INTENSITY_RANGE / 4)) {
+  if (intensityLight2 > MAXIMUM_LIGHT_INTENSITY - (LIGHT_INTENSITY_RANGE / 4)) {
     digitalWrite(LED_BUILTIN, HIGH);
   } else {
     digitalWrite(LED_BUILTIN, LOW);
   }
   
-  // update the pulse signal
-  unsigned long durationSincePulse = millis() - lastPulseTimestamp;
-  fadeFactor = ((float) durationSincePulse / (LIGHT_PULSE_DURATION * 2));
-  if (durationSincePulse >= LIGHT_PULSE_DURATION) {
-    fadeFactor = 1 - fadeFactor;
-  }
-  fadeFactor *= 2;
-  fadeFactor = constrain(fadeFactor, 0, 1);
-  
-  // scale the intensity to be in range of maximum and minimum
-  float lightIntensityPulse = MINIMUM_LIGHT_INTENSITY_PULSE + (fadeFactor * LIGHT_INTENSITY_RANGE_PULSE);
-  
-  //logValue("P", lightIntensityPulse, 10);
-  
-  pinValue = 255 * lightIntensityPulse * intensityMultiplier;
-  analogWrite(HAT_LIGHTS_PULSE_PIN, pinValue);
-  
-  if (durationSincePulse >= LIGHT_PULSE_DELAY) {
-    lastPulseTimestamp = millis();
-  }
 }
 
 /**

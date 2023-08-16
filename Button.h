@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 
-#define BUTTON_DEBOUNCE_TIME   30   // x ms after button has changed to avoid double clicks
+#define BUTTON_DEBOUNCE_TIME 40// x ms after button has changed to avoid double clicks
 
 
 class Button {
@@ -22,6 +22,7 @@ class Button {
     void update(); // Must be called before following functions
     bool isPressedThisFrame();
     bool isPressed();
+    bool peek(); // Returns the actual sensor state even before a press is registered
 };
 
 #endif

@@ -2,7 +2,7 @@
 
 
 TapTempoButton::TapTempoButton() :
-    tempo(0),
+    tempo(124),
     lastTapTime(0),
     tapTimes{0} {
 }
@@ -14,10 +14,6 @@ void TapTempoButton::begin(byte pin) {
 
 void TapTempoButton::update(){
   this->button.update();
-}
-
-float TapTempoButton::getTempo() {
-  return this->tempo;
 }
 
 bool TapTempoButton::hasTempoChanged() { // to call once per loop()
@@ -46,10 +42,15 @@ bool TapTempoButton::hasTempoChanged() { // to call once per loop()
   for (byte j = 1 ; j <= this->lastTapTime ; j++)
     timeDifferences += this->tapTimes[j] - this->tapTimes[j-1];
 
-  this->tempo = (60000*this->lastTapTime) / (float)timeDifferences; // timeDiff / lastTapTime = average of the time diff between taps
-  if (this->tempo > TAPTEMPO_MAXTEMPO)
-    this->tempo = TAPTEMPO_MAXTEMPO;
-  return true;
+  float newTempo = (60000*this->lastTapTime) / (float)timeDifferences; // timeDiff / lastTapTime = average of the time diff between taps
+  newTempo = constrain(newTempo, TAPTEMPO_MINTEMPO, TAPTEMPO_MAXTEMPO);
+  float diff = abs(this->tempo - newTempo);
+  if (diff > TAPTEMPO_EPSILON) {
+    this->setTempo(newTempo);
+    return true;
+  }
+  
+  return false;
 }
 
 bool TapTempoButton::isPressedThisFrame() {
@@ -58,4 +59,22 @@ bool TapTempoButton::isPressedThisFrame() {
 
 bool TapTempoButton::isPressed() {
   return this->button.isPressed();
+}
+
+bool TapTempoButton::resetTapMeasurement() {
+  this->tapTimes[0] = 0;
+  this->lastTapTime = 0;
+}
+
+int TapTempoButton::getBeatDurationMillis() {
+  return (int) (60000.0 / this->tempo);
+}
+
+float TapTempoButton::getTempo() { 
+  return this->tempo;
+}
+
+void TapTempoButton::setTempo(float tempo) {
+  tempo = constrain(tempo, TAPTEMPO_MINTEMPO, TAPTEMPO_MAXTEMPO);
+  this->tempo = tempo;
 }

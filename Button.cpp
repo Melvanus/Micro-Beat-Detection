@@ -8,7 +8,7 @@ Button::Button() :
 }
 
 void Button::begin(byte pin) {  
-  //pinMode(pin, INPUT_PULLUP);
+  pinMode(pin, INPUT);
   bool st = digitalRead(pin);
   this->lastReadState = st;
   this->currentState = st;
@@ -37,4 +37,8 @@ bool Button::isPressedThisFrame() {
 
 bool Button::isPressed() {
   return this->currentState;
+}
+
+bool Button::peek() {
+  return this->lastReadState;
 }
